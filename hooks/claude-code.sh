@@ -40,8 +40,14 @@ if [[ -z "$SESSION_ID" ]] || [[ -z "$PANE_ID" ]] || [[ "$PANE_ID" == "unknown" ]
     exit 0
 fi
 
-# Create state directory for this pane
-PANE_STATE_DIR="${STATE_DIR}/${PANE_ID}"
+# Get workspace name via wezterm CLI
+WORKSPACE=$(wezterm cli list --format json 2>/dev/null | jq -r --arg pane "$PANE_ID" '.[] | select(.pane_id == ($pane | tonumber)) | .workspace' 2>/dev/null)
+if [[ -z "$WORKSPACE" ]]; then
+    WORKSPACE="default"
+fi
+
+# Create state directory: workspace/pane_id/session_id
+PANE_STATE_DIR="${STATE_DIR}/${WORKSPACE}/${PANE_ID}"
 mkdir -p "$PANE_STATE_DIR"
 
 SESSION_STATE_FILE="${PANE_STATE_DIR}/${SESSION_ID}"

@@ -1,12 +1,12 @@
--- WezTerm Agent Deck Plugin
--- Monitor Claude Code status via hook state files, render in WezTerm
+-- WezTerm Agent Status Plugin
+-- Monitor Claude Code status via hook state files
 local wezterm = require('wezterm')
 
 local M = {}
 
 -- Internal state
 local state = {
-    agent_states = {},  -- pane_id -> { agent_type, status, last_update }
+    agent_states = {},  -- workspace_name -> { agent_type, status, last_update }
 }
 
 --[[ ============================================
@@ -15,39 +15,6 @@ local state = {
 
 local default_config = {
     update_interval = 5000,
-
-    right_status = {
-        enabled = true,
-    },
-
-    colors = {
-        working = 'green',
-        waiting = 'yellow',
-        idle = 'blue',
-        inactive = 'gray',
-    },
-
-    icons = {
-        style = 'unicode',
-        unicode = {
-            working = '●',
-            waiting = '◔',
-            idle = '○',
-            inactive = '◌',
-        },
-        nerd = {
-            working = '',
-            waiting = '',
-            idle = '',
-            inactive = '',
-        },
-        emoji = {
-            working = '🟢',
-            waiting = '🟡',
-            idle = '🔵',
-            inactive = '⚪',
-        },
-    },
 
     hooks = {
         state_dir = '~/.local/state/claude-wezterm',
@@ -99,18 +66,6 @@ local function get_config()
     return current_config
 end
 
-local function get_status_color(status_name)
-    local cfg = get_config()
-    return cfg.colors[status_name] or cfg.colors.inactive
-end
-
-local function get_status_icon(status_name)
-    local cfg = get_config()
-    local icon_style = cfg.icons.style or 'unicode'
-    local icons = cfg.icons[icon_style] or cfg.icons.unicode
-    return icons[status_name] or icons.inactive
-end
-
 --[[ ============================================
      Hook-based Status Detection
      ============================================ ]]
@@ -132,132 +87,115 @@ local function expand_home(path)
     return path:gsub('^~', home)
 end
 
-local function read_hook_status(pane_id, config)
+local function read_hook_statuses(workspace, config)
     local hooks_config = config.hooks
     if not hooks_config then return nil end
 
     local state_dir = expand_home(hooks_config.state_dir or '~/.local/state/claude-wezterm')
-    local pane_dir = state_dir .. '/' .. tostring(pane_id)
+    local ws_dir = state_dir .. '/' .. tostring(workspace)
 
-    local handle = io.popen('ls -1 "' .. pane_dir .. '" 2>/dev/null')
+    local handle = io.popen('ls -1 "' .. ws_dir .. '" 2>/dev/null')
     if not handle then return nil end
     local output = handle:read('*a')
     handle:close()
     if not output or output == '' then return nil end
 
-    local best_status = nil
-    local best_priority = 0
-
-    for filename in output:gmatch('[^\n]+') do
-        if filename ~= '' then
-            local fh = io.open(pane_dir .. '/' .. filename, 'r')
-            if fh then
-                local content = fh:read('*a')
-                fh:close()
-                local hook_status = normalize_hook_status(content)
-                local priority = HOOK_STATUS_PRIORITY[hook_status] or 0
-                if priority > best_priority then
-                    best_priority = priority
-                    best_status = hook_status
+    local sessions = {}
+    for pane_name in output:gmatch('[^\n]+') do
+        if pane_name ~= '' then
+            local pane_dir = ws_dir .. '/' .. pane_name
+            -- Each pane dir contains session files; pick highest priority status
+            local pane_handle = io.popen('ls -1 "' .. pane_dir .. '" 2>/dev/null')
+            if pane_handle then
+                local pane_output = pane_handle:read('*a')
+                pane_handle:close()
+                if pane_output and pane_output ~= '' then
+                    local best_status = nil
+                    local best_priority = 0
+                    for session_file in pane_output:gmatch('[^\n]+') do
+                        if session_file ~= '' then
+                            local fh = io.open(pane_dir .. '/' .. session_file, 'r')
+                            if fh then
+                                local content = fh:read('*a')
+                                fh:close()
+                                local hook_status = normalize_hook_status(content)
+                                local priority = HOOK_STATUS_PRIORITY[hook_status] or 0
+                                if priority > best_priority then
+                                    best_priority = priority
+                                    best_status = hook_status
+                                end
+                            end
+                        end
+                    end
+                    if best_status then
+                        table.insert(sessions, {
+                            pane_id = pane_name,
+                            status = best_status,
+                        })
+                    end
                 end
             end
         end
     end
 
-    return best_status
+    if #sessions == 0 then return nil end
+    return sessions
 end
 
 --[[ ============================================
      Core Plugin Logic
      ============================================ ]]
 
-local function get_agent_state(pane_id)
-    return state.agent_states[pane_id]
-end
+local function update_workspace_state(workspace, config)
+    local sessions = read_hook_statuses(workspace, config)
 
-local function update_pane_state(pane, config)
-    local pane_id = pane:pane_id()
-    local now = os.time() * 1000
-
-    local new_status = read_hook_status(pane_id, config)
-
-    if not new_status then
-        -- No hook state files for this pane — not a tracked agent
-        if state.agent_states[pane_id] then
-            state.agent_states[pane_id] = nil
-        end
+    if not sessions then
+        state.agent_states[workspace] = nil
         return nil
     end
 
-    local current = state.agent_states[pane_id]
-    if not current then
-        current = { agent_type = 'claude', status = new_status, last_update = now }
-        state.agent_states[pane_id] = current
-        return current
-    end
-
-    current.status = new_status
-    current.last_update = now
-    return current
-end
-
-local function get_all_agent_states()
-    return state.agent_states
-end
-
-local function count_agents_by_status()
-    local counts = { working = 0, waiting = 0, idle = 0, inactive = 0 }
-    for _, agent_state in pairs(state.agent_states) do
-        local s = agent_state.status or 'inactive'
-        counts[s] = (counts[s] or 0) + 1
-    end
-    return counts
+    state.agent_states[workspace] = sessions
+    return sessions
 end
 
 --[[ ============================================
-     Right Status Rendering
+     Workspace Status Query
      ============================================ ]]
 
-local function get_tab_statuses(window)
-    local tab_statuses = {}
-    for _, mux_tab in ipairs(window:mux_window():tabs()) do
-        local pane_statuses = {}
-        for _, p in ipairs(mux_tab:panes()) do
-            local p_state = get_agent_state(p:pane_id())
-            if p_state then
-                table.insert(pane_statuses, p_state.status)
-            end
-        end
-        if #pane_statuses > 0 then
-            local tab_index = mux_tab:tab_id()
-            local tabs = window:mux_window():tabs()
-            for i, t in ipairs(tabs) do
-                if t:tab_id() == mux_tab:tab_id() then
-                    tab_index = i
-                    break
-                end
-            end
-            table.insert(tab_statuses, { index = tab_index, statuses = pane_statuses })
+local function get_workspace_statuses()
+    -- Build a lookup of pane_id -> status from hook state
+    local pane_status_map = {}
+    for _, sessions in pairs(state.agent_states) do
+        for _, s in ipairs(sessions) do
+            pane_status_map[s.pane_id] = s.status
         end
     end
-    return tab_statuses
-end
 
-local function render_right_status(tab_statuses)
-    if #tab_statuses == 0 then return {} end
+    local workspace_map = {}
+    for _, mux_win in ipairs(wezterm.mux.all_windows()) do
+        local ws = mux_win:get_workspace()
+        if not workspace_map[ws] then
+            workspace_map[ws] = {}
+        end
 
-    local result = { { Text = ' ' } }
-    for i, entry in ipairs(tab_statuses) do
-        if i > 1 then
-            table.insert(result, { Text = ' | ' })
+        for _, mux_tab in ipairs(mux_win:tabs()) do
+            local tab_title = mux_tab:get_title()
+            for _, p in ipairs(mux_tab:panes()) do
+                local pid = tostring(p:pane_id())
+                table.insert(workspace_map[ws], {
+                    pane_id = pid,
+                    tab_name = tab_title,
+                    status = pane_status_map[pid] or 'inactive',
+                })
+            end
         end
-        local icons = {}
-        for _, s in ipairs(entry.statuses) do
-            table.insert(icons, get_status_icon(s))
-        end
-        table.insert(result, { Text = tostring(entry.index) .. '.' .. table.concat(icons, ' ') })
     end
-    table.insert(result, { Text = ' ' })
+
+    local result = {}
+    for ws, panes in pairs(workspace_map) do
+        table.insert(result, { workspace = ws, tabs = panes })
+    end
+    table.sort(result, function(a, b) return a.workspace < b.workspace end)
 
     return result
 end
@@ -273,41 +211,25 @@ function M.apply_to_config(config, opts)
     config.status_update_interval = plugin_config.update_interval
 
     wezterm.on('update-status', function(window, pane)
-        for _, mux_tab in ipairs(window:mux_window():tabs()) do
-            for _, p in ipairs(mux_tab:panes()) do
-                update_pane_state(p, plugin_config)
-            end
-        end
-
-        if plugin_config.right_status.enabled then
-            local tab_statuses = get_tab_statuses(window)
-            local right_status = render_right_status(tab_statuses)
-
-            if right_status and #right_status > 0 then
-                window:set_right_status(wezterm.format(right_status))
-            else
-                window:set_right_status('')
+        local seen = {}
+        for _, mux_win in ipairs(wezterm.mux.all_windows()) do
+            local ws = mux_win:get_workspace()
+            if not seen[ws] then
+                seen[ws] = true
+                update_workspace_state(ws, plugin_config)
             end
         end
     end)
 
-    wezterm.log_info('[agent-deck] Plugin applied to config')
+    wezterm.log_info('[agent-status] Plugin applied to config')
 end
 
--- Query API: use in your own format-tab-title or update-status handlers
-M.get_agent_state = get_agent_state           -- (pane_id) -> { agent_type, status } | nil
-M.get_all_agent_states = get_all_agent_states -- () -> { pane_id -> { agent_type, status } }
-M.count_agents_by_status = count_agents_by_status -- () -> { working=N, waiting=N, idle=N }
-M.get_status_color = get_status_color         -- (status) -> color string
-M.get_status_icon = get_status_icon           -- (status) -> icon string
-M.get_config = get_config                     -- () -> config table
-M.set_config = set_config                     -- (opts) -> nil
-M.update_pane = function(pane)                -- (pane) -> state | nil
-    return update_pane_state(pane, get_config())
-end
+M.get_workspace_statuses = get_workspace_statuses
+M.get_config = get_config
+M.set_config = set_config
 
 -- Expose internals for testing
-M._read_hook_status = read_hook_status       -- (pane_id, config) -> status | nil
-M._normalize_hook_status = normalize_hook_status -- (raw) -> status string
+M._read_hook_statuses = read_hook_statuses
+M._normalize_hook_status = normalize_hook_status
 
 return M

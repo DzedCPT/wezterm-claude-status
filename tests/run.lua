@@ -83,7 +83,6 @@ runner:test('read_hook_status returns highest priority across sessions', functio
         ['session-3'] = 'waiting',
     })
     local config = { hooks = { state_dir = base } }
-    -- waiting > working > idle, so should return waiting
     t.eq(plugin._read_hook_status(7, config), 'waiting')
     cleanup_hook_state(base)
 end)
