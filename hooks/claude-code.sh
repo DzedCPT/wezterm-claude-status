@@ -2,6 +2,7 @@
 # Claude Code hook script for WezTerm Agent Deck
 # Writes agent status to state files that the plugin reads for status detection.
 #
+#asdfafasfsadf
 # Setup: Add to your Claude Code hooks config (~/.claude/settings.json):
 #   {
 #     "hooks": {
@@ -16,6 +17,9 @@
 #   }
 
 set -e
+
+
+# Something something
 
 STATE_DIR="${HOME}/.local/state/claude-wezterm"
 
